@@ -5,7 +5,7 @@
 import { DEFAULT_OUTPUT_LANGUAGE, outputLanguageDisplayName, parseOutputLanguage, type OutputLanguage } from '../agentv3/outputLanguage';
 import { getProviderService, type OpenAIProtocol, type ProviderScope } from '../services/providerManager';
 import { mergeIsolatedProviderEnv } from '../services/providerManager/envIsolation';
-import { hasConcreteEnvValue } from '../agentRuntime/envCredentialSources';
+import { hasConcreteEnvValue, redactUrlForDiagnostics } from '../agentRuntime/envCredentialSources';
 
 export interface OpenAIAgentConfig {
   model: string;
@@ -114,6 +114,7 @@ export function getOpenAIRuntimeDiagnostics(providerId?: string | null, provider
     model: config.model,
     lightModel: config.lightModel,
     protocol: config.protocol,
+    baseUrl: redactUrlForDiagnostics(config.baseURL),
     baseUrlConfigured: hasConcreteEnvValue(env.OPENAI_BASE_URL),
     configured: hasOpenAICredentials(providerId, providerScope),
     credentialSources,

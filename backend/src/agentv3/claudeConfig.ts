@@ -9,7 +9,7 @@ import { getRegisteredScenes } from './strategyLoader';
 import { DEFAULT_OUTPUT_LANGUAGE, localize, outputLanguageDisplayName, parseOutputLanguage, type OutputLanguage } from './outputLanguage';
 import { mergeIsolatedProviderEnv } from '../services/providerManager/envIsolation';
 import type { ProviderScope } from '../services/providerManager';
-import { collectEnvCredentialSources, hasConcreteEnvValue, isEnabledEnvFlag } from '../agentRuntime/envCredentialSources';
+import { collectEnvCredentialSources, hasConcreteEnvValue, isEnabledEnvFlag, redactUrlForDiagnostics } from '../agentRuntime/envCredentialSources';
 
 export type EffortLevel = 'low' | 'medium' | 'high' | 'max';
 
@@ -230,6 +230,7 @@ export function getClaudeRuntimeDiagnostics(
     providerMode,
     model: env.CLAUDE_MODEL || DEFAULT_MODEL,
     lightModel: env.CLAUDE_LIGHT_MODEL || DEFAULT_LIGHT_MODEL,
+    baseUrl: redactUrlForDiagnostics(env.ANTHROPIC_BASE_URL),
     outputLanguage: {
       value: parseOutputLanguage(env.SMARTPERFETTO_OUTPUT_LANGUAGE),
       displayName: outputLanguageDisplayName(parseOutputLanguage(env.SMARTPERFETTO_OUTPUT_LANGUAGE)),

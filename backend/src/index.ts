@@ -45,15 +45,8 @@ import workspaceWindowRoutes from './routes/workspaceWindowRoutes';
 import comparisonRoutes from './routes/comparisonRoutes';
 import traceProcessorProxyRoutes, { handleTraceProcessorProxyUpgrade } from './routes/traceProcessorProxyRoutes';
 import {authenticate} from './middleware/auth';
-import {
-  getClaudeRuntimeDiagnostics,
-} from './agentv3/claudeConfig';
-import {
-  getOpenAIRuntimeDiagnostics,
-} from './agentOpenAI';
-import { resolveAgentRuntimeSelection } from './agentRuntime';
 import { collectEnvCredentialSources } from './agentRuntime/envCredentialSources';
-import { getProviderService } from './services/providerManager';
+import { buildRuntimeHealthPayload } from './agentRuntime/runtimeHealth';
 import {
   getLegacyApiUsageSnapshot,
 } from './services/legacyApiTelemetry';
@@ -72,7 +65,6 @@ import {
 import { TraceProcessorFactory, killOrphanProcessors } from './services/workingTraceProcessor';
 import { getPortPool, resetPortPool } from './services/portPool';
 import { failInterruptedAnalysisRunsOnStartup } from './services/analysisRunStore';
-import { getSmartPerfettoVersion } from './version';
 
 const app = express();
 const PORT = serverConfig.port;
@@ -104,53 +96,7 @@ app.use(express.urlencoded({ extended: true, limit: serverConfig.bodyLimit }));
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-  const runtimeSelection = resolveAgentRuntimeSelection();
-  const providerSvc = getProviderService();
-  const activeProvider = providerSvc.list().find(p => p.isActive);
-  const selectedProviderId = runtimeSelection.source === 'provider'
-    ? runtimeSelection.providerId
-    : null;
-  const claudeDiagnostics = getClaudeRuntimeDiagnostics(
-    runtimeSelection.kind === 'claude-agent-sdk' ? selectedProviderId : null,
-  );
-  const openAIDiagnostics = getOpenAIRuntimeDiagnostics(
-    runtimeSelection.kind === 'openai-agents-sdk' ? selectedProviderId : null,
-  );
-  const selectedDiagnostics = runtimeSelection.kind === 'openai-agents-sdk'
-    ? openAIDiagnostics
-    : claudeDiagnostics;
-  const envSources = collectEnvCredentialSources(process.env, 'health');
-  const providerOverridesEnv = runtimeSelection.source === 'provider' && envSources.length > 0;
-
-  res.json({
-    status: 'OK',
-    timestamp: new Date().toISOString(),
-    environment: NODE_ENV,
-    version: getSmartPerfettoVersion(),
-    aiEngine: {
-      runtime: runtimeSelection.kind,
-      model: selectedDiagnostics.model,
-      providerMode: selectedDiagnostics.providerMode,
-      configured: selectedDiagnostics.configured,
-      source: runtimeSelection.source,
-      credentialSource: runtimeSelection.source === 'provider'
-        ? 'provider-manager'
-        : 'env-or-default',
-      envCredentialSources: envSources,
-      providerOverridesEnv,
-      ...(activeProvider ? {
-        activeProvider: {
-          id: activeProvider.id,
-          name: activeProvider.name,
-          type: activeProvider.type,
-        },
-      } : {}),
-      authRequired: !!process.env.SMARTPERFETTO_API_KEY
-        || process.env.SMARTPERFETTO_ENTERPRISE === 'true'
-        || !!process.env.SMARTPERFETTO_OIDC_ISSUER_URL,
-      diagnostics: selectedDiagnostics,
-    },
-  });
+  res.json(buildRuntimeHealthPayload());
 });
 
 // Debug endpoint to check env vars

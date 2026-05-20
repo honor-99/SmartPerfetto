@@ -145,6 +145,7 @@ describe('getClaudeRuntimeDiagnostics', () => {
     expect(diagnostics.providerMode).toBe('anthropic_compatible_proxy');
     expect(diagnostics.model).toBe('mimo-main');
     expect(diagnostics.lightModel).toBe('mimo-light');
+    expect(diagnostics.baseUrl).toBe('http://localhost:3000/');
     expect(diagnostics.configured).toBe(true);
     expect(diagnostics.credentialSources).toContain('anthropic_compatible_proxy');
   });

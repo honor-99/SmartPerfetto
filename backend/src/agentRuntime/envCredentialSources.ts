@@ -28,6 +28,23 @@ export function hasConcreteEnvValue(value: string | undefined): boolean {
   return true;
 }
 
+export function redactUrlForDiagnostics(value: string | undefined): string | undefined {
+  if (!value || !hasConcreteEnvValue(value)) return undefined;
+  const trimmed = value.trim();
+  try {
+    const url = new URL(trimmed);
+    url.username = '';
+    url.password = '';
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+  } catch {
+    return trimmed
+      .replace(/\/\/[^/@\s]+@/, '//')
+      .replace(/[?#].*$/, '');
+  }
+}
+
 export function isEnabledEnvFlag(value: string | undefined): boolean {
   if (!value || !hasConcreteEnvValue(value)) return false;
   const normalized = value.trim().toLowerCase();

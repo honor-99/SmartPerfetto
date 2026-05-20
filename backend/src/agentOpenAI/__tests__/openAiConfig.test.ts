@@ -166,4 +166,13 @@ describe('createOpenAIEnv', () => {
     expect(diagnostics.baseUrlConfigured).toBe(true);
     expect(diagnostics.credentialSources).toEqual(['openai_base_url']);
   });
+
+  it('redacts sensitive URL parts from diagnostic base URL', () => {
+    process.env.OPENAI_API_KEY = 'sk-openai-test';
+    process.env.OPENAI_BASE_URL = 'https://user:pass@example.com/v1?token=secret#fragment';
+
+    const diagnostics = getOpenAIRuntimeDiagnostics(null);
+
+    expect(diagnostics.baseUrl).toBe('https://example.com/v1');
+  });
 });
