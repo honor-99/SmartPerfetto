@@ -106,14 +106,15 @@ function shouldExclude(relativePath: string, basename: string, excludeNames: str
 }
 
 export class PathSecurityGate {
-  private readonly allowlistRoots: string[];
+  // null means "read from env at call time" (supports dotenv loaded after module init)
+  private readonly allowlistRootsOverride: string[] | null;
   private readonly excludeNames: string[];
   private readonly allowedExtensions: Set<string>;
   private readonly maxFileBytes: number;
   private readonly maxFiles: number;
 
   constructor(options: PathSecurityGateOptions = {}) {
-    this.allowlistRoots = options.allowlistRoots ?? configuredAllowlistRoots();
+    this.allowlistRootsOverride = options.allowlistRoots ?? null;
     this.excludeNames = options.excludeNames ?? DEFAULT_EXCLUDES;
     this.allowedExtensions = new Set(options.allowedExtensions ?? DEFAULT_EXTENSIONS);
     this.maxFileBytes = options.maxFileBytes ?? 200 * 1024;
@@ -121,6 +122,9 @@ export class PathSecurityGate {
   }
 
   preview(rootPath: string): PathPreviewResult {
+    // Read env lazily so SMARTPERFETTO_CODEBASE_ROOTS set via dotenv (loaded after
+    // module init in ESM) is visible on the first real request.
+    const allowlistRoots = this.allowlistRootsOverride ?? configuredAllowlistRoots();
     const rootRealpath = safeRealpath(rootPath);
     if (!rootRealpath) {
       return {
@@ -132,7 +136,7 @@ export class PathSecurityGate {
         blockedReason: 'root_not_found',
       };
     }
-    if (this.allowlistRoots.length === 0 || !isWithinAllowlist(rootRealpath, this.allowlistRoots)) {
+    if (allowlistRoots.length === 0 || !isWithinAllowlist(rootRealpath, allowlistRoots)) {
       return {
         rootPath,
         rootRealpath,
