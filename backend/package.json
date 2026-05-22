@@ -120,7 +120,7 @@
     "@jest/globals": "^30.4.1",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
-    "@types/glob": "^8.1.0",
+    "@types/glob": "^9.0.0",
     "@types/jest": "^30.0.0",
     "@types/markdown-it": "^14.1.2",
     "@types/multer": "^2.0.0",
