@@ -8,10 +8,9 @@
  * Generates detailed HTML reports for analysis results
  * Reports include:
  * - Full thinking process
- * - All SQL queries and results
+ * - Structured evidence tables and compact provenance
  * - Detailed tables with expanded lists
  * - Diagnostic information
- * - Executable SQL for reproduction
  */
 
 import markdownit from 'markdown-it';
@@ -4114,7 +4113,8 @@ export class HTMLReportGenerator {
     const traceStartNs = data.traceStartNs ? this.parseNs(data.traceStartNs) : null;
     const normalizedConversationTimeline = this.normalizeConversationTimeline(
       conversationTimeline || [],
-      dialogue || []
+      dialogue || [],
+      outputLanguage,
     );
     const partialWarningHtml = result.partial
       ? `
@@ -4234,12 +4234,34 @@ export class HTMLReportGenerator {
       margin-bottom: 16px; border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden;
     }
     .envelope-header {
-      display: flex; justify-content: space-between; align-items: center;
+      display: grid; gap: 4px; align-items: start;
       padding: 12px 16px; background: #f9fafb; border-bottom: 1px solid #e5e7eb;
     }
     .envelope-title { font-weight: 600; font-size: 14px; color: #374151; }
     .envelope-meta { font-size: 11px; color: #9ca3af; }
     .envelope-body { padding: 0; }
+    .envelope-technical-details {
+      margin-top: 8px; font-size: 11px; color: #6b7280;
+    }
+    .envelope-technical-details > summary {
+      cursor: pointer; user-select: none; color: #4b5563; font-weight: 500;
+    }
+    .envelope-technical-grid {
+      margin-top: 8px; display: grid; grid-template-columns: 128px minmax(0, 1fr);
+      gap: 5px 10px; padding: 8px; background: #fff; border: 1px solid #e5e7eb; border-radius: 6px;
+    }
+    .envelope-technical-key { color: #6b7280; font-weight: 500; }
+    .envelope-technical-value {
+      color: #374151; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      word-break: break-all;
+    }
+    .envelope-sql-detail {
+      margin-top: 8px; background: #111827; color: #e5e7eb; border-radius: 6px; overflow: auto;
+      max-height: 260px;
+    }
+    .envelope-sql-detail pre {
+      margin: 0; padding: 10px; font-size: 11px; line-height: 1.5; white-space: pre-wrap;
+    }
     .evidence-section { margin-top: 10px; padding: 10px; background: #f8f9fa; border-radius: 6px; }
     .evidence-item { font-size: 12px; color: #666; margin-bottom: 4px; }
     .evidence-support { color: #10b981; }
@@ -5280,19 +5302,18 @@ export class HTMLReportGenerator {
   ): string {
     if (!envelope || !envelope.data) return '';
 
-    const title = envelope.display?.title || localize(outputLanguage, `数据表 ${index + 1}`, `Data Table ${index + 1}`);
+    const title = this.getReportEnvelopeTitle(
+      envelope,
+      localize(outputLanguage, `数据表 ${index + 1}`, `Data Table ${index + 1}`),
+      outputLanguage,
+    );
     const source = envelope.meta?.source || '';
-    const skillId = envelope.meta?.skillId || '';
-    const stepId = envelope.meta?.stepId || '';
-    const evidenceRefId = envelope.meta?.evidenceRefId || '';
     const traceSide = (envelope.meta as any)?.traceSide || (envelope as any)?.traceSide || '';
-    const traceId = (envelope.meta as any)?.traceId || (envelope as any)?.traceId || '';
     const planPhaseId = envelope.meta?.planPhaseId || '';
     const planPhaseTitle = envelope.meta?.planPhaseTitle || '';
-    const planPhaseAttribution = (envelope.meta as any)?.planPhaseAttribution || '';
-    const planPhaseWarning = (envelope.meta as any)?.planPhaseWarning || '';
-    const sourceToolCallId = envelope.meta?.sourceToolCallId || '';
-    const producerReason = envelope.meta?.producerReason || envelope.meta?.toolNarration || '';
+    const producerReason = this.getReportEnvelopePurpose(envelope, title, outputLanguage);
+    const rowCount = this.getEnvelopeRowCount(envelope);
+    const layer = envelope.display?.layer || '';
 
     const metaParts: string[] = [];
     if (traceSide) {
@@ -5300,18 +5321,14 @@ export class HTMLReportGenerator {
         ? localize(outputLanguage, '参考 Trace', 'Reference trace')
         : localize(outputLanguage, '当前 Trace', 'Current trace')));
     }
-    if (skillId) metaParts.push(this.escapeHtml(skillId));
-    if (stepId) metaParts.push(this.escapeHtml(stepId));
-    if (source && source !== skillId) metaParts.push(this.escapeHtml(source));
+    if (source) metaParts.push(`${this.escapeHtml(localize(outputLanguage, '来源', 'Source'))}: ${this.escapeHtml(this.formatEnvelopeSource(source))}`);
+    if (layer) metaParts.push(this.escapeHtml(`DataEnvelope.${layer}`));
     if (planPhaseId || planPhaseTitle) {
       metaParts.push(`${this.escapeHtml(localize(outputLanguage, '阶段', 'Phase'))}: ${this.escapeHtml([planPhaseId, planPhaseTitle].filter(Boolean).join(' '))}`);
     }
-    if (planPhaseAttribution && planPhaseAttribution !== 'active') {
-      metaParts.push(`${this.escapeHtml(localize(outputLanguage, '阶段归因', 'Phase attribution'))}: ${this.escapeHtml(planPhaseAttribution)}`);
+    if (rowCount !== undefined) {
+      metaParts.push(this.escapeHtml(localize(outputLanguage, `${rowCount} 行`, `${rowCount} rows`)));
     }
-    if (sourceToolCallId) metaParts.push(`${this.escapeHtml(localize(outputLanguage, '工具调用', 'Tool call'))}: ${this.escapeHtml(sourceToolCallId)}`);
-    if (traceId) metaParts.push(`${this.escapeHtml(localize(outputLanguage, 'Trace', 'Trace'))}: ${this.escapeHtml(traceId)}`);
-    if (evidenceRefId) metaParts.push(`${this.escapeHtml(localize(outputLanguage, '证据', 'Evidence'))}: ${this.escapeHtml(evidenceRefId)}`);
 
     let bodyHtml: string;
     if (envelope.display?.format === 'summary') {
@@ -5321,20 +5338,402 @@ export class HTMLReportGenerator {
     } else {
       bodyHtml = this.generateTableFromEnvelope(envelope, traceStartNs, outputLanguage);
     }
+    const technicalDetails = this.renderEnvelopeTechnicalDetails(envelope, outputLanguage);
 
     return `
       <div class="envelope-card">
         <div class="envelope-header">
           <div class="envelope-title">${this.escapeHtml(title)}</div>
           <div class="envelope-meta">${metaParts.join(' / ')}</div>
-          ${producerReason ? `<div class="envelope-meta">${this.escapeHtml(producerReason)}</div>` : ''}
-          ${planPhaseWarning ? `<div class="envelope-meta">${this.escapeHtml(planPhaseWarning)}</div>` : ''}
+          ${producerReason ? `<div class="envelope-meta">${this.escapeHtml(localize(outputLanguage, '用途', 'Purpose'))}: ${this.escapeHtml(producerReason)}</div>` : ''}
+          ${technicalDetails}
         </div>
         <div class="envelope-body">
           ${bodyHtml}
         </div>
       </div>
     `;
+  }
+
+  private renderEnvelopeTechnicalDetails(
+    envelope: DataEnvelope,
+    outputLanguage: OutputLanguage,
+  ): string {
+    const meta = envelope.meta || {};
+    const rows: Array<[string, unknown]> = [
+      [localize(outputLanguage, '证据 ID', 'Evidence ID'), meta.evidenceRefId],
+      [localize(outputLanguage, '工具调用 ID', 'Tool call ID'), meta.sourceToolCallId],
+      [localize(outputLanguage, 'Trace ID', 'Trace ID'), meta.traceId || (envelope as any).traceId],
+      [localize(outputLanguage, 'Query Hash', 'Query hash'), meta.queryHash],
+      [localize(outputLanguage, 'Params Hash', 'Params hash'), meta.paramsHash],
+      [localize(outputLanguage, 'Artifact ID', 'Artifact ID'), meta.artifactId],
+      [localize(outputLanguage, 'Source Artifact', 'Source artifact'), meta.sourceArtifactId],
+      [localize(outputLanguage, 'Identity', 'Identity'), meta.identityRefId],
+      [localize(outputLanguage, 'Identity 状态', 'Identity status'), meta.identityStatus],
+      [localize(outputLanguage, '阶段归因', 'Phase attribution'), meta.planPhaseAttribution],
+      [localize(outputLanguage, '阶段目标', 'Phase goal'), meta.planPhaseGoal],
+      [localize(outputLanguage, '阶段告警', 'Phase warning'), meta.planPhaseWarning],
+      [localize(outputLanguage, '工具说明', 'Tool narration'), meta.toolNarration],
+      [localize(outputLanguage, '进程身份告警', 'Process identity warning'), meta.processIdentityWarning],
+      [localize(outputLanguage, 'Stdlib 模块', 'Stdlib modules'), (envelope as any).stdlibInjectedModules],
+    ];
+    const renderedRows = rows
+      .map(([label, value]) => this.renderEnvelopeTechnicalRow(label, value))
+      .filter(Boolean)
+      .join('');
+    const sql = String((envelope as any).sql || '').trim();
+    if (!renderedRows && !sql) return '';
+
+    return `
+      <details class="envelope-technical-details">
+        <summary>${this.escapeHtml(localize(outputLanguage, '技术细节（默认收起）', 'Technical details (collapsed by default)'))}</summary>
+        ${renderedRows ? `<div class="envelope-technical-grid">${renderedRows}</div>` : ''}
+        ${sql ? `
+          <div class="envelope-sql-detail">
+            <pre>${this.escapeHtml(sql)}</pre>
+          </div>
+        ` : ''}
+      </details>
+    `;
+  }
+
+  private renderEnvelopeTechnicalRow(label: string, value: unknown): string {
+    const text = this.formatTechnicalValue(value);
+    if (!text) return '';
+    return `
+      <div class="envelope-technical-key">${this.escapeHtml(label)}</div>
+      <div class="envelope-technical-value">${this.escapeHtml(text)}</div>
+    `;
+  }
+
+  private formatTechnicalValue(value: unknown): string {
+    if (value === null || value === undefined || value === '') return '';
+    if (Array.isArray(value)) {
+      if (value.length === 0) return '';
+      return value.map(item => this.formatTechnicalValue(item)).filter(Boolean).join(', ');
+    }
+    if (typeof value === 'object') {
+      try {
+        return JSON.stringify(value);
+      } catch {
+        return String(value);
+      }
+    }
+    return String(value);
+  }
+
+  private getReportEnvelopeTitle(
+    envelope: DataEnvelope,
+    fallbackTitle: string,
+    outputLanguage: OutputLanguage,
+  ): string {
+    const title = String(envelope.display?.title || fallbackTitle || '').trim();
+    if (!this.isGenericSqlTitle(title)) return title || fallbackTitle;
+
+    const columns = this.getEnvelopeColumns(envelope);
+    const columnSet = new Set(columns.map(col => col.toLowerCase()));
+    const has = (...names: string[]) => names.some(name => columnSet.has(name.toLowerCase()));
+
+    if (has('state') && (has('state_dur_ms') || has('state_pct'))) {
+      return localize(outputLanguage, 'SQL 结果 · Slice 线程状态分布', 'SQL result · Slice thread-state distribution');
+    }
+    if (has('slice_name') && (has('self_ms') || has('self_dur_ms'))) {
+      return localize(outputLanguage, 'SQL 结果 · 主线程热点 Slice', 'SQL result · Main-thread hot slices');
+    }
+    if (has('slice_name') && (has('dur_ms') || has('total_ms') || has('total_dur_ms'))) {
+      return localize(outputLanguage, 'SQL 结果 · Slice 命中明细', 'SQL result · Slice matches');
+    }
+    if (has('reason_id') || (has('reason') && has('severity'))) {
+      return localize(outputLanguage, 'SQL 结果 · 诊断规则命中', 'SQL result · Diagnostic rule matches');
+    }
+    if (has('thread_name') || has('process_name') || has('upid') || has('utid')) {
+      return localize(outputLanguage, 'SQL 结果 · 线程/进程明细', 'SQL result · Thread/process details');
+    }
+    if (has('count') && (has('avg_ms') || has('total_ms') || has('total_dur_ms'))) {
+      return localize(outputLanguage, 'SQL 结果 · 耗时聚合统计', 'SQL result · Duration aggregation');
+    }
+
+    return localize(outputLanguage, 'SQL 结果 · 数据验证', 'SQL result · Data verification');
+  }
+
+  private getReportEnvelopePurpose(
+    envelope: DataEnvelope,
+    displayTitle: string,
+    outputLanguage: OutputLanguage,
+  ): string {
+    const producerReason = String(envelope.meta?.producerReason || '').trim();
+    const toolNarration = String(envelope.meta?.toolNarration || '').trim();
+    const inferred = this.inferReportEnvelopePurpose(envelope, displayTitle, outputLanguage);
+    if (producerReason && !this.isLowSignalEnvelopeReason(producerReason)) return producerReason;
+    if (inferred) return inferred;
+    if (toolNarration && !this.isLowSignalEnvelopeReason(toolNarration)) {
+      return toolNarration.replace(/^执行\s*(?:当前|参考)?\s*Trace\s*SQL[：:]\s*/i, '');
+    }
+    return producerReason || toolNarration;
+  }
+
+  private inferReportEnvelopePurpose(
+    envelope: DataEnvelope,
+    displayTitle: string,
+    outputLanguage: OutputLanguage,
+  ): string {
+    const title = displayTitle.toLowerCase();
+    const source = String(envelope.meta?.source || '').toLowerCase();
+    const phase = String(envelope.meta?.planPhaseId || '').toLowerCase();
+    const identity = `${title} ${source} ${phase}`;
+    const columns = this.getEnvelopeColumns(envelope).map(col => col.toLowerCase());
+    const has = (...names: string[]) => names.some(name => columns.includes(name.toLowerCase()));
+
+    if (/洞见摘要|__synthesize_summary__|insight/.test(identity)) {
+      return localize(
+        outputLanguage,
+        '压缩本轮启动的关键指标、异常提示和候选方向，用来决定后续优先下钻哪些问题。',
+        'Condenses key startup metrics, warnings, and candidate directions so later phases know which issues to drill into first.',
+      );
+    }
+    if (/启动数据质量|startup_quality/.test(identity)) {
+      return localize(
+        outputLanguage,
+        '核对采样完整性、缺失项和质量警告，用来判断本轮结论是否可靠、是否需要降级为假设。',
+        'Checks sampling completeness, missing data, and quality warnings to decide whether conclusions are reliable or should remain hypotheses.',
+      );
+    }
+    if (/证据矩阵|evidence matrix/.test(identity)) {
+      return localize(
+        outputLanguage,
+        '汇总本阶段命中的规则、证据和归因标签，用来把根因树里的判断落到可核对的证据记录。',
+        'Summarizes matched rules, evidence, and attribution tags so the root-cause tree can be checked against concrete evidence.',
+      );
+    }
+    if (/主线程可操作热点|actionable.*slice|hot slice/.test(identity) || (has('slice_name') && has('self_ms'))) {
+      return localize(
+        outputLanguage,
+        '定位主线程里真正消耗 self time 的可优化 slice，用来判断启动耗时主要花在业务/模拟负载、框架包裹还是等待。',
+        'Identifies main-thread slices that own self time, showing whether startup cost comes from app/simulated work, framework wrappers, or waiting.',
+      );
+    }
+    if (/线程状态|thread-state|state distribution/.test(identity) || (has('state') && has('state_dur_ms'))) {
+      return localize(
+        outputLanguage,
+        '拆分热点 slice 的 Running/S/D/R 状态，用来区分 CPU 计算、主动等待、IO 等待和调度等待。',
+        'Breaks hot slices into Running/S/D/R states to distinguish CPU work, voluntary wait, IO wait, and scheduling wait.',
+      );
+    }
+    if (/主线程耗时操作|main_thread_slices/.test(identity)) {
+      return localize(
+        outputLanguage,
+        '按耗时聚合启动期间主线程操作，用来先圈出影响启动墙钟时间的最大候选阶段。',
+        'Aggregates main-thread operations during startup to identify the largest wall-time candidates before deeper analysis.',
+      );
+    }
+    if (/主线程文件\s*io|main_thread_file_io/.test(identity)) {
+      return localize(
+        outputLanguage,
+        '筛出启动期间主线程文件 IO，用来判断是否存在磁盘访问拖慢启动，或证明 IO 不是主因。',
+        'Highlights main-thread file IO during startup to decide whether disk access slowed launch or can be ruled out.',
+      );
+    }
+    if (/主线程同步\s*binder|main_thread_sync_binder/.test(identity)) {
+      return localize(
+        outputLanguage,
+        '只看主线程同步 Binder 调用，用来判断主线程是否被跨进程返回时间卡住。',
+        'Focuses on synchronous Binder calls on the main thread to see whether IPC response time blocks launch.',
+      );
+    }
+    if (/启动期间\s*binder|startup_binder/.test(identity)) {
+      return localize(
+        outputLanguage,
+        '汇总启动窗口内 Binder 调用耗时和次数，用来评估跨进程通信是否对启动耗时有实质贡献。',
+        'Summarizes Binder call cost and count during startup to evaluate whether IPC materially contributes to launch time.',
+      );
+    }
+    if (/binder\s*阻塞|binder_blocking/.test(identity)) {
+      return localize(
+        outputLanguage,
+        '检查主线程 Binder 等待和远端阻塞关系，用来判断慢启动是否由服务端响应或线程池排队触发。',
+        'Checks main-thread Binder waiting and remote blocking relationships to determine whether service response or thread-pool queueing caused delay.',
+      );
+    }
+    if (/启动期间主线程状态|main_thread_state_during_startup/.test(identity)) {
+      return localize(
+        outputLanguage,
+        '汇总启动窗口主线程 Running、Sleep、D、Runnable 占比，用来区分 CPU 忙、主动等待、IO 等待和调度等待。',
+        'Summarizes main-thread Running, Sleep, D, and Runnable time to separate CPU work, voluntary wait, IO wait, and scheduling wait.',
+      );
+    }
+    if (/启动期间类加载|class_loading/.test(identity)) {
+      return localize(
+        outputLanguage,
+        '检查启动窗口类加载记录，用来判断冷启动是否被类加载或反射初始化放大。',
+        'Checks class-loading records during startup to decide whether cold-start cost is amplified by class loading or reflection initialization.',
+      );
+    }
+    if (/启动期间\s*gc|gc_during_startup/.test(identity)) {
+      return localize(
+        outputLanguage,
+        '统计启动窗口 GC 类型、线程和耗时占比，用来判断内存回收是否干扰主线程启动路径。',
+        'Summarizes GC type, thread, and duration share during startup to decide whether memory reclamation interfered with launch.',
+      );
+    }
+    if (/启动期间调度延迟|sched_latency_during_startup/.test(identity)) {
+      return localize(
+        outputLanguage,
+        '量化 Runnable 等待和最大调度延迟，用来判断系统调度是否让主线程迟迟拿不到 CPU。',
+        'Quantifies Runnable waiting and maximum scheduling latency to see whether scheduler delay kept the main thread off CPU.',
+      );
+    }
+    if (/启动延迟归因|slow reason|诊断规则/.test(identity) || has('reason_id') || (has('reason') && has('severity'))) {
+      return localize(
+        outputLanguage,
+        '列出命中的启动慢规则和证据，用来判断哪些方向应进入根因树，哪些只是低优先级背景信号。',
+        'Lists matched startup-slow rules and evidence to decide which signals belong in the root-cause tree and which are background only.',
+      );
+    }
+    if (/启动\s*#?\d*\s*详情|startup_info/.test(identity)) {
+      return localize(
+        outputLanguage,
+        '校准单次启动 ID、起止时间、dur 和 TTID/TTFD，用来保证详情深钻沿用同一个启动窗口。',
+        'Calibrates the single startup id, bounds, duration, and TTID/TTFD so detail drill-down uses the same launch window.',
+      );
+    }
+    if (/初始化\s*cpu\s*拓扑|init_cpu_topology/.test(identity)) {
+      return localize(
+        outputLanguage,
+        '确认 CPU 核型和拓扑信息是否可用，用来判断后续大小核、频率和调度分析的可信度。',
+        'Confirms CPU topology availability so later core-placement, frequency, and scheduling analysis can be trusted.',
+      );
+    }
+    if (/大小核占比|cpu_core_analysis/.test(identity)) {
+      return localize(
+        outputLanguage,
+        '统计主线程 Running 时间落在大核/小核的比例，用来判断启动是否受小核执行或摆核策略影响。',
+        'Measures main-thread Running time on big versus little cores to determine whether core placement affected startup.',
+      );
+    }
+    if (/cpu\s*频率爬升|freq_rampup/.test(identity)) {
+      return localize(
+        outputLanguage,
+        '比较启动早期和稳定阶段的 CPU 频率，用来判断是否存在频率爬升过慢导致的启动拖延。',
+        'Compares early and steady CPU frequency to detect startup delay from slow frequency ramp-up.',
+      );
+    }
+    if (/cpu\s*频率|cpu_freq_analysis/.test(identity)) {
+      return localize(
+        outputLanguage,
+        '汇总启动期间 CPU 频率水平，用来判断系统算力供给是否偏低。',
+        'Summarizes CPU frequency during startup to decide whether compute supply was low.',
+      );
+    }
+    if (/四大象限|quadrant_analysis/.test(identity)) {
+      return localize(
+        outputLanguage,
+        '把主线程耗时拆成大核运行、小核运行、Runnable、IO 阻塞和 Sleep，用来定位根因所属象限。',
+        'Breaks main-thread time into big-core running, little-core running, Runnable, IO blocked, and Sleep to locate the root-cause quadrant.',
+      );
+    }
+    if (/主线程摆核时序|cpu_placement_timeline/.test(identity)) {
+      return localize(
+        outputLanguage,
+        '按时间桶展示主线程落在大核/小核的变化，用来定位慢阶段是否伴随小核执行或频繁迁移。',
+        'Shows main-thread big/little-core placement by time bucket to locate slow intervals with little-core execution or migrations.',
+      );
+    }
+    if (/binder\s*线程池|binder_pool/.test(identity)) {
+      return localize(
+        outputLanguage,
+        '检查 Binder 线程池容量、占用和评估结论，用来排除或确认远端线程池饱和。',
+        'Checks Binder thread-pool capacity, occupancy, and assessment to rule out or confirm remote pool saturation.',
+      );
+    }
+    if (/启动关键任务|critical_tasks/.test(identity)) {
+      return localize(
+        outputLanguage,
+        '列出启动窗口全线程关键任务的 CPU、睡眠和摆核情况，用来识别主线程外的竞争或依赖任务。',
+        'Lists CPU, sleep, and core placement for critical tasks across threads to identify off-main-thread competition or dependencies.',
+      );
+    }
+    if (/线程阻塞关系图|thread_blocking_graph/.test(identity)) {
+      return localize(
+        outputLanguage,
+        '构建线程间等待关系，用来验证是否存在锁、Binder 或线程依赖形成的阻塞链。',
+        'Builds inter-thread waiting relationships to verify lock, Binder, or thread-dependency blocking chains.',
+      );
+    }
+    if (/jit\s*影响|jit_analysis/.test(identity)) {
+      return localize(
+        outputLanguage,
+        '检查 JIT/编译活动是否落在启动关键路径，用来判断代码热身是否拖慢冷启动。',
+        'Checks whether JIT or compilation activity lands on the startup critical path.',
+      );
+    }
+    if (/问题诊断|startup_diagnosis/.test(identity)) {
+      return localize(
+        outputLanguage,
+        '承接技能内置诊断输出，用来确认是否已有明确问题标签、严重度或可执行建议。',
+        'Carries skill-level diagnosis output to confirm problem labels, severity, and actionable suggestions.',
+      );
+    }
+    if (/启动事件|startup/.test(identity) && (has('startup_type') || has('ttid_ms') || has('dur_ms'))) {
+      return localize(
+        outputLanguage,
+        '确认本次启动事件、启动类型、耗时边界和 TTID/TTFD 口径，是后续阶段归因的时间窗口基础。',
+        'Confirms the startup event, launch type, duration bounds, and TTID/TTFD scope used by later attribution steps.',
+      );
+    }
+    if (/sql 结果|sql result/.test(title)) {
+      if (/webview|p2_10/.test(identity)) {
+        return localize(
+          outputLanguage,
+          '验证启动和 TTID 差值区间内是否存在 WebView/渲染相关 slice，用来排除 WebView 启动路径误判。',
+          'Checks whether WebView or rendering slices appear in the startup-to-TTID gap to avoid misclassifying the launch path.',
+        );
+      }
+      return localize(
+        outputLanguage,
+        '验证综合结论里的具体数据点，帮助确认命中的 slice、耗时和 self time 是否支撑当前根因判断。',
+        'Verifies concrete data points in the conclusion, checking whether matched slices, durations, and self time support the root-cause call.',
+      );
+    }
+
+    return localize(
+      outputLanguage,
+      '提供本阶段判断所需的结构化数据，用来核对关键指标、实体和时间范围。',
+      'Provides structured data for this phase so key metrics, entities, and time windows can be checked.',
+    );
+  }
+
+  private isGenericSqlTitle(title: string): boolean {
+    return /^SQL\s+Query(?:\s*\([^)]+\))?$/i.test(String(title || '').trim());
+  }
+
+  private isLowSignalEnvelopeReason(reason: string): boolean {
+    const text = String(reason || '').trim();
+    if (!text) return true;
+    return (
+      /^调用 Skill .+收集本阶段结构化证据。?$/.test(text) ||
+      /^执行(?:当前|参考)?\s*Trace\s*SQL，?验证(?:本阶段|对比)?(?:的)?(?:具体)?数据点。?$/.test(text) ||
+      /^执行当前 Trace SQL，验证本阶段的具体数据点。?$/.test(text)
+    );
+  }
+
+  private getEnvelopeColumns(envelope: DataEnvelope): string[] {
+    const dataColumns = Array.isArray(envelope.data?.columns) ? envelope.data.columns : [];
+    const displayColumns = Array.isArray(envelope.display?.columns) ? envelope.display.columns.map(col => col.name) : [];
+    return [...dataColumns, ...displayColumns]
+      .map(col => String(col || '').trim())
+      .filter(Boolean);
+  }
+
+  private getEnvelopeRowCount(envelope: DataEnvelope): number | undefined {
+    const rows = (envelope.data as any)?.rows;
+    if (Array.isArray(rows)) return rows.length;
+    const expandable = (envelope.data as any)?.expandableData;
+    if (Array.isArray(expandable)) return expandable.length;
+    return undefined;
+  }
+
+  private formatEnvelopeSource(source: string): string {
+    return String(source || '').replace(/^([^:#]+):/, '$1#');
   }
 
   /**
@@ -5568,7 +5967,8 @@ export class HTMLReportGenerator {
       timestamp?: number;
       sourceEventType?: string;
     }>,
-    dialogue: Array<{ agentId: string; type: 'task' | 'response' | 'question'; content: any; timestamp: number }>
+    dialogue: Array<{ agentId: string; type: 'task' | 'response' | 'question'; content: any; timestamp: number }>,
+    outputLanguage: OutputLanguage = DEFAULT_OUTPUT_LANGUAGE,
   ): Array<{
     eventId: string;
     ordinal: number;
@@ -5590,7 +5990,10 @@ export class HTMLReportGenerator {
 
     if (Array.isArray(timeline) && timeline.length > 0) {
       for (const item of timeline) {
-        const text = String(item?.text || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+        const text = this.compactConversationTimelineText(
+          String(item?.text || '').replace(/\s+/g, ' ').trim(),
+          outputLanguage,
+        ).slice(0, 240);
         const ordinal = Number(item?.ordinal);
         if (!text || !Number.isFinite(ordinal) || ordinal <= 0) continue;
         const phaseRaw = String(item?.phase || '').toLowerCase();
@@ -5616,13 +6019,13 @@ export class HTMLReportGenerator {
       for (let i = 0; i < dialogue.length; i++) {
         const item = dialogue[i];
         const content = item?.content || {};
-        const text = String(
+        const text = this.compactConversationTimelineText(String(
           content.message ||
           content.summary ||
           content.taskTitle ||
           content.phase ||
           ''
-        ).replace(/\s+/g, ' ').trim().slice(0, 240);
+        ).replace(/\s+/g, ' ').trim(), outputLanguage).slice(0, 240);
         if (!text) continue;
         const phase = item.type === 'task' ? 'tool' : item.type === 'response' ? 'result' : 'thinking';
         normalized.push({
@@ -5644,6 +6047,25 @@ export class HTMLReportGenerator {
       }
     }
     return [...byOrdinal.values()].sort((a, b) => a.ordinal - b.ordinal);
+  }
+
+  private compactConversationTimelineText(
+    text: string,
+    outputLanguage: OutputLanguage = DEFAULT_OUTPUT_LANGUAGE,
+  ): string {
+    let compact = String(text || '').trim();
+    if (!compact) return compact;
+
+    compact = compact.replace(/SQL Query\s*\((\d+)\s+rows?\)/gi, (_match, rows) =>
+      localize(outputLanguage, `SQL 结果（${rows} 行）`, `SQL result (${rows} rows)`),
+    );
+    compact = compact.replace(/执行\s*(?:当前|参考)?\s*Trace\s*SQL[：:]\s*/gi, localize(outputLanguage, '验证数据：', 'Verify data: '));
+    compact = compact.replace(
+      /，?已登记\s*\d+\s*个证据 ID[：:]\s*执行当前 Trace SQL，验证本阶段的具体数据点。?/g,
+      '',
+    );
+    compact = compact.replace(/执行当前 Trace SQL，验证本阶段的具体数据点。?/g, '');
+    return compact.replace(/\s+/g, ' ').replace(/，。/g, '。').trim();
   }
 
   private getConversationPhaseLabel(

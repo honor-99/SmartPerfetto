@@ -224,10 +224,13 @@ describe('HTMLReportGenerator', () => {
     });
 
     expect(html).toContain('Reference SQL Summary');
-    expect(html).toContain('data:sql_summary:reference:trace-hash:query-hash:tool-hash');
+    expect(html).toContain('来源: execute_sql');
+    expect(html).toContain('DataEnvelope.overview');
     expect(html).toContain('阶段: p1 Compare baseline');
-    expect(html).toContain('工具调用: execute_sql_on:1:params_hash:reference');
-    expect(html).toContain('执行参考 Trace SQL，验证对比差异。');
+    expect(html).toContain('用途: 执行参考 Trace SQL，验证对比差异。');
+    expect(html).toContain('技术细节（默认收起）');
+    expect(html).toContain('data:sql_summary:reference:trace-hash:query-hash:tool-hash');
+    expect(html).toContain('execute_sql_on:1:params_hash:reference');
     expect(html).toContain('total_rows');
     expect(html).toContain('10');
     expect(html).not.toContain('无汇总数据');
@@ -520,8 +523,75 @@ describe('HTMLReportGenerator', () => {
 
     expect(html).toContain('SQL execution diagnostic');
     expect(html).toContain('SQL execution did not produce a table: bad sql');
-    expect(html).toContain('阶段归因: inferred');
+    expect(html).not.toContain('阶段归因: inferred');
+    expect(html).toContain('data:sql_diagnostic:current:trace-hash:query-hash:tool-hash');
+    expect(html).toContain('execute_sql:1:params_hash');
     expect(html).not.toContain('无数据');
+  });
+
+  test('renders generic SQL DataEnvelope with an explanatory report title and purpose', () => {
+    const generator = new HTMLReportGenerator();
+    const html = generator.generateAgentDrivenHTML({
+      traceId: 'trace-sql',
+      query: '分析启动性能',
+      timestamp: Date.now(),
+      hypotheses: [],
+      dialogue: [],
+      agentResponses: [],
+      dataEnvelopes: [{
+        meta: {
+          type: 'sql_result',
+          version: '2.0.0',
+          source: 'execute_sql',
+          timestamp: Date.now(),
+          evidenceRefId: 'data:sql_table:current:trace-hash:query-hash:tool-hash',
+          sourceToolCallId: 'execute_sql:9:params_hash',
+          traceSide: 'current',
+          planPhaseId: 'p3',
+          planPhaseTitle: '综合结论',
+          producerReason: '执行当前 Trace SQL，验证本阶段的具体数据点。',
+        },
+        display: {
+          layer: 'list',
+          format: 'table',
+          title: 'SQL Query (2 rows)',
+          columns: [
+            { name: 'slice_name', type: 'string' as any },
+            { name: 'total_ms', type: 'duration' as any, format: 'duration_ms' as any, unit: 'ms' },
+            { name: 'self_ms', type: 'duration' as any, format: 'duration_ms' as any, unit: 'ms' },
+          ],
+        },
+        data: {
+          columns: ['slice_name', 'total_ms', 'self_ms'],
+          rows: [
+            ['LoadSimulator_ActivityInit', 710.06, 249.8],
+            ['ChaosTask', 15.97, 15.97],
+          ],
+        } as any,
+        sql: 'SELECT slice_name, total_ms, self_ms FROM hot_slices',
+      } as any],
+      result: {
+        sessionId: 'session-sql',
+        success: true,
+        findings: [],
+        hypotheses: [],
+        conclusion: 'ok',
+        confidence: 0.8,
+        rounds: 1,
+        totalDurationMs: 1000,
+      },
+    });
+
+    expect(html).toContain('SQL 结果 · 主线程热点 Slice');
+    expect(html).toContain('用途: 定位主线程里真正消耗 self time 的可优化 slice');
+    expect(html).toContain('来源: execute_sql');
+    expect(html).toContain('阶段: p3 综合结论');
+    expect(html).toContain('2 行');
+    expect(html).not.toContain('SQL Query (2 rows)');
+    expect(html).not.toContain('执行当前 Trace SQL，验证本阶段的具体数据点。');
+    expect(html).toContain('data:sql_table:current:trace-hash:query-hash:tool-hash');
+    expect(html).toContain('execute_sql:9:params_hash');
+    expect(html).toContain('SELECT slice_name, total_ms, self_ms FROM hot_slices');
   });
 
   test('renders mermaid diagrams with stronger visual defaults for causal chains', () => {
