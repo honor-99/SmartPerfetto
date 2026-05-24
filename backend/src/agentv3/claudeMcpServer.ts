@@ -1598,7 +1598,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     'Execute a raw SQL query against the Perfetto trace_processor for the currently loaded trace. ' +
     'Returns columnar results. Set summary=true for large result sets to get column statistics + sample rows.\n\n' +
     'Use when: ad-hoc queries not covered by existing skills, verifying hypotheses with specific SQL, checking raw data.\n' +
-    'Don\'t use when: a matching skill exists (use invoke_skill instead — richer layered output), or you need schema info (use lookup_sql_schema first).\n\n' +
+    'Don\'t use when: a matching skill exists (use invoke_skill instead — richer layered output), you need schema info (use lookup_sql_schema first), or you need to inspect rows already returned as an artifact (use fetch_artifact; do not copy artifact rows into FROM (VALUES ...)).\n\n' +
     'SQL safety rules: qualify duplicate column names after JOINs. Do not write bare SELECT name/ts/dur when joining slice/thread/process; use s.name AS slice_name, s.ts, s.dur, t.name AS thread_name, p.name AS process_name, or prefer the thread_slice stdlib view. FrameTimeline rows expose upid, not utid/process_name; use JOIN process USING(upid) for actual_frame_timeline_slice. thread_slice does not expose self_dur directly; JOIN slice_self_dur USING(id) when self time is needed. When using thread_slice, read thread_name and process_name directly; do not write t.name or p.name unless JOIN thread t or JOIN process p is present. The thread table main-thread column is is_main_thread, not main_thread. Do not query __intrinsic_* names or skill step names such as batch_frame_root_cause as SQL tables; they are skill artifacts, use fetch_artifact for those rows.\n\n' +
     'Examples:\n' +
     '1. Count jank frames: sql="SELECT COUNT(*) as jank_count FROM actual_frame_timeline_slice WHERE jank_type != \'None\'", summary=false\n' +
@@ -1667,8 +1667,8 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
               phase: 'analyzing',
               message: localize(
                 outputLanguage,
-                `SQL 查询错误: ${result.error.substring(0, 200)}`,
-                `SQL query error: ${result.error.substring(0, 200)}`,
+                'SQL 查询未产出可用结果，已记录诊断信息供修正后重试。',
+                'SQL query did not produce usable results; diagnostic details were recorded for a corrected retry.',
               ),
             },
             timestamp: Date.now(),
@@ -1753,23 +1753,12 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
 
         if (emitUpdate && success && result.columns.length > 0) {
           emittedEvidence = emitSqlDataEnvelope(emitUpdate, result.columns, rows, finalSql, injected, traceProvenance, producer, processIdentityWarning);
-        } else if (emitUpdate && !success) {
-          emittedEvidence = emitSqlDiagnosticDataEnvelope(
-            emitUpdate,
-            result.error || localize(outputLanguage, 'SQL 执行失败', 'SQL execution failed'),
-            finalSql,
-            injected,
-            traceProvenance,
-            producer,
-            processIdentityWarning,
-            outputLanguage,
-          );
         }
 
         return {
           content: [{
             type: 'text' as const,
-            text: consumeWatchdogWarning(JSON.stringify({
+            text: consumeWatchdogWarning(JSON.stringify(success ? {
               success,
               columns: result.columns,
               rows,
@@ -1787,8 +1776,21 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
               ...(sqlRewrites.length > 0 ? { sqlRewrites } : {}),
               stdlibInjectedModules: injected,
               ...(processIdentityWarning ? { processIdentityWarning } : {}),
-              ...(result.error ? { error: result.error } : {}),
-            })) + (success ? getReasoningNudge() : ''),
+            } : buildSqlFailureToolPayload({
+              error: result.error || localize(outputLanguage, 'SQL 执行失败', 'SQL execution failed'),
+              traceSide: traceProvenance.traceSide,
+              traceId: traceProvenance.traceId,
+              traceProvenance,
+              sourceToolCallId: producer.sourceToolCallId,
+              paramsHash: producer.paramsHash,
+              planPhaseId: producer.planPhaseId,
+              executableSql: finalSql,
+              sqlRewrites,
+              stdlibInjectedModules: injected,
+              processIdentityWarning,
+              durationMs: result.durationMs,
+              outputLanguage,
+            })) + (success ? getReasoningNudge() : '')),
           }],
         };
       } catch (err) {
@@ -1797,36 +1799,30 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           traceId,
           traceSide: 'current',
         });
-        const emittedEvidence = emitUpdate ? emitSqlDiagnosticDataEnvelope(
-          emitUpdate,
-          errMsg,
-          sql,
-          undefined,
-          traceProvenance,
-          producer,
-          undefined,
-          outputLanguage,
-        ) : undefined;
         emitUpdate?.({
           type: 'progress',
           content: {
             phase: 'analyzing',
-            message: localize(outputLanguage, `SQL 查询失败: ${errMsg}`, `SQL query failed: ${errMsg}`),
+            message: localize(
+              outputLanguage,
+              'SQL 查询未产出可用结果，已记录诊断信息供修正后重试。',
+              'SQL query did not produce usable results; diagnostic details were recorded for a corrected retry.',
+            ),
           },
           timestamp: Date.now(),
         });
         return {
-          content: [{ type: 'text' as const, text: JSON.stringify({
-            success: false,
+          content: [{ type: 'text' as const, text: JSON.stringify(buildSqlFailureToolPayload({
             traceSide: 'current',
             traceId,
             traceProvenance,
-            evidenceRefId: emittedEvidence?.evidenceRefId,
             sourceToolCallId: producer.sourceToolCallId,
             paramsHash: producer.paramsHash,
             planPhaseId: producer.planPhaseId,
             error: errMsg,
-          }) }],
+            executableSql: sql,
+            outputLanguage,
+          })) }],
           isError: true,
         };
       }
@@ -2409,7 +2405,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     'Retrieve detailed data for a previously stored artifact from invoke_skill results. ' +
     'Supports pagination for large datasets — use offset/limit to page through rows without token overflow. ' +
     'Response includes totalRows and hasMore to guide pagination. ALL data is accessible; nothing is hidden.\n\n' +
-    'Use when: you need detailed data from a previous invoke_skill result (artifacts are referenced by ID in skill responses).\n' +
+    'Use when: you need detailed data from a previous invoke_skill result (artifacts are referenced by ID in skill responses). Analyze these rows directly; do not copy them into execute_sql as FROM (VALUES ...).\n' +
     'Don\'t use when: you need new data (use invoke_skill or execute_sql instead).\n' +
     'Always set purpose to one short sentence explaining why this artifact is needed for the current plan phase.\n\n' +
     'Examples:\n' +
@@ -4214,7 +4210,7 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
     'Execute a SQL query against a specific trace in comparison mode. ' +
     'Use "current" for the primary trace, "reference" for the comparison trace.\n\n' +
     'Use when: you need to drill into a specific trace during comparison analysis, ' +
-    'or verify a finding from compare_skill with more targeted SQL.\n\n' +
+    'or verify a finding from compare_skill with more targeted SQL. Do not copy rows from compare_skill/fetch_artifact into FROM (VALUES ...); use fetch_artifact rows directly.\n\n' +
     'SQL safety rules: qualify duplicate column names after JOINs. Do not write bare SELECT name/ts/dur when joining slice/thread/process; use s.name AS slice_name, s.ts, s.dur, t.name AS thread_name, p.name AS process_name, or prefer the thread_slice stdlib view. FrameTimeline rows expose upid, not utid/process_name; use JOIN process USING(upid) for actual_frame_timeline_slice. thread_slice does not expose self_dur directly; JOIN slice_self_dur USING(id) when self time is needed. When using thread_slice, read thread_name and process_name directly; do not write t.name or p.name unless JOIN thread t or JOIN process p is present. The thread table main-thread column is is_main_thread, not main_thread.\n\n' +
     'Examples:\n' +
     '1. Check reference trace jank: trace="reference", sql="SELECT COUNT(*) FROM actual_frame_timeline_slice WHERE jank_type != \'None\'"\n' +
@@ -4312,19 +4308,9 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
             producer,
             processIdentityWarning,
           );
-        } else if (emitUpdate && !success) {
-          emittedEvidence = emitSqlDiagnosticDataEnvelope(
-            emitUpdate,
-            result.error || localize(outputLanguage, 'SQL 执行失败', 'SQL execution failed'),
-            finalSql,
-            injected,
-            traceProvenance,
-            producer,
-            processIdentityWarning,
-          );
         }
 
-        const text = JSON.stringify({
+        const text = JSON.stringify(success ? {
           success,
           trace: traceLabel,
           traceSide: trace,
@@ -4343,39 +4329,43 @@ export function createClaudeMcpServer(options: ClaudeMcpServerOptions) {
           ...(sqlRewrites.length > 0 ? { sqlRewrites } : {}),
           stdlibInjectedModules: injected,
           ...(processIdentityWarning ? { processIdentityWarning } : {}),
-          error: result.error,
-        });
+        } : buildSqlFailureToolPayload({
+          error: result.error || localize(outputLanguage, 'SQL 执行失败', 'SQL execution failed'),
+          trace: traceLabel,
+          traceSide: trace,
+          traceId: targetTraceId,
+          traceProvenance,
+          sourceToolCallId: producer.sourceToolCallId,
+          paramsHash: producer.paramsHash,
+          planPhaseId: producer.planPhaseId,
+          executableSql: finalSql,
+          sqlRewrites,
+          stdlibInjectedModules: injected,
+          processIdentityWarning,
+          durationMs,
+          outputLanguage,
+        }));
         return { content: [{ type: 'text' as const, text: consumeWatchdogWarning(success ? text + getReasoningNudge() : text) }] };
       } catch (e: any) {
         const traceProvenance = buildTraceProcessorQueryProvenance({
           traceId: targetTraceId,
           traceSide: trace,
         });
-        const emittedEvidence = emitUpdate ? emitSqlDiagnosticDataEnvelope(
-          emitUpdate,
-          e.message,
-          sql,
-          undefined,
-          traceProvenance,
-          producer,
-          undefined,
-          outputLanguage,
-        ) : undefined;
         return {
           content: [{
             type: 'text' as const,
-            text: JSON.stringify({
-              success: false,
+            text: JSON.stringify(buildSqlFailureToolPayload({
               trace: traceLabel,
               traceSide: trace,
               traceId: targetTraceId,
               traceProvenance,
-              evidenceRefId: emittedEvidence?.evidenceRefId,
               sourceToolCallId: producer.sourceToolCallId,
               paramsHash: producer.paramsHash,
               planPhaseId: producer.planPhaseId,
               error: e.message,
-            }),
+              executableSql: sql,
+              outputLanguage,
+            })),
           }],
         };
       }
@@ -4872,65 +4862,59 @@ function emitSqlSummaryDataEnvelope(
   return { evidenceRefId, queryHash };
 }
 
-/** Emit a diagnostic DataEnvelope for failed SQL so missing tables remain explainable. */
-function emitSqlDiagnosticDataEnvelope(
-  emit: (update: StreamingUpdate) => void,
-  error: string,
-  sql?: string,
-  stdlibInjectedModules?: string[],
-  traceProvenance?: TraceProcessorQueryProvenance,
-  producer?: EvidenceProducerContext,
-  processIdentityWarning?: string,
-  outputLanguage: OutputLanguage = DEFAULT_OUTPUT_LANGUAGE,
-): { evidenceRefId: string; queryHash: string } {
-  const { evidenceRefId, queryHash } = stableSqlEvidenceRefId(
-    sql,
-    [],
-    [[error]],
-    traceProvenance,
-    producer,
-    'diagnostic',
-  );
-  const envelope = createDataEnvelope(
-    {
-      text: [
-        localize(outputLanguage, 'SQL 执行未产出可用表格。', 'SQL execution did not produce a table.'),
-        localize(outputLanguage, '这是一条失败诊断，不是可引用的性能证据；需要修正 SQL 后重试。', 'This is a failure diagnostic, not citable performance evidence; fix the SQL and retry.'),
-        `Error: ${error}`,
-        sql ? `SQL: ${sql}` : '',
-      ].filter(Boolean).join('\n'),
-    },
-    {
-      type: 'diagnostic',
-      source: 'execute_sql',
-      title: localize(outputLanguage, 'SQL 执行诊断', 'SQL diagnostic'),
-      layer: 'diagnosis',
-      format: 'text',
-      evidenceRefId,
-      traceSide: traceProvenance?.traceSide,
-      traceId: traceProvenance?.traceId,
-      queryHash,
-      ...producerEnvelopeOptions(producer),
-      processIdentityWarning,
-      intent: 'ad_hoc_sql_diagnostic',
-    },
-  );
+interface SqlFailureToolPayloadInput {
+  error: string;
+  trace?: string;
+  traceSide?: TraceProcessorTraceSide;
+  traceId?: string;
+  traceProvenance: TraceProcessorQueryProvenance;
+  sourceToolCallId?: string;
+  paramsHash?: string;
+  planPhaseId?: string;
+  executableSql?: string;
+  sqlRewrites?: string[];
+  stdlibInjectedModules?: string[];
+  processIdentityWarning?: string;
+  durationMs?: number;
+  outputLanguage?: OutputLanguage;
+}
 
-  emit({
-    type: 'data',
-    content: [{
-      ...envelope,
-      ...(sql ? { sql } : {}),
-      ...(stdlibInjectedModules?.length ? { stdlibInjectedModules } : {}),
-      ...(traceProvenance ? {
-        traceSide: traceProvenance.traceSide,
-        traceId: traceProvenance.traceId,
-        traceProvenance,
-      } : {}),
-    }],
-    timestamp: Date.now(),
-  });
-  return { evidenceRefId, queryHash };
+function buildSqlFailureToolPayload(input: SqlFailureToolPayloadInput): Record<string, unknown> {
+  const outputLanguage = input.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE;
+  return {
+    success: false,
+    ...(input.trace ? { trace: input.trace } : {}),
+    traceSide: input.traceSide,
+    traceId: input.traceId,
+    traceProvenance: input.traceProvenance,
+    columns: [],
+    rows: [],
+    totalRows: 0,
+    truncated: false,
+    ...(input.durationMs !== undefined ? { durationMs: input.durationMs } : {}),
+    sourceToolCallId: input.sourceToolCallId,
+    paramsHash: input.paramsHash,
+    planPhaseId: input.planPhaseId,
+    executableSql: input.executableSql,
+    ...(input.sqlRewrites && input.sqlRewrites.length > 0 ? { sqlRewrites: input.sqlRewrites } : {}),
+    stdlibInjectedModules: input.stdlibInjectedModules || [],
+    ...(input.processIdentityWarning ? { processIdentityWarning: input.processIdentityWarning } : {}),
+    error: input.error,
+    diagnostic: {
+      type: 'sql_execution_failed',
+      citableEvidence: false,
+      message: localize(
+        outputLanguage,
+        'SQL 执行未产出可用表格；这不是可引用的性能证据。',
+        'SQL execution did not produce a usable table; this is not citable performance evidence.',
+      ),
+      retryHint: localize(
+        outputLanguage,
+        '修正 SQL 或改用 fetch_artifact / invoke_skill 后重试。不要把失败诊断作为结论证据。',
+        'Fix the SQL or retry with fetch_artifact / invoke_skill. Do not cite failed diagnostics as conclusion evidence.',
+      ),
+    },
+  };
 }
 
 function inferSqlColumnType(col: string): 'timestamp' | 'duration' | 'percentage' | 'string' {

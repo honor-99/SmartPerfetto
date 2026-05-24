@@ -851,7 +851,7 @@ describe('createClaudeMcpServer', () => {
       expect(executedSql).toMatch(/JOIN\s+process\s+p\s+USING\s*\(\s*upid\s*\)/i);
     });
 
-    it('execute_sql emits sourced envelopes for empty and failed current-trace SQL', async () => {
+    it('execute_sql emits sourced envelopes for empty SQL but does not stream failed SQL as frontend data', async () => {
       const { tools, emittedUpdates, mockTpService } = createTestServer();
       await callTool(tools, 'submit_plan', {
         phases: [{ id: 'p1', name: 'Test', goal: 'Test', expectedTools: ['execute_sql'] }],
@@ -882,8 +882,21 @@ describe('createClaudeMcpServer', () => {
         },
       });
       expect(failedResult.success).toBe(false);
-      expect(diagnosticEnvelope?.meta?.evidenceRefId).toBe(failedResult.evidenceRefId);
-      expect(diagnosticEnvelope?.data?.text).toContain('bad sql');
+      expect(failedResult.evidenceRefId).toBeUndefined();
+      expect(diagnosticEnvelope).toBeUndefined();
+      expect(failedResult.diagnostic).toMatchObject({
+        type: 'sql_execution_failed',
+        citableEvidence: false,
+      });
+      expect(failedResult.error).toContain('bad sql');
+      const progressMessages = emittedUpdates
+        .filter((u: any) => u.type === 'progress')
+        .map((u: any) => String(u.content?.message || ''));
+      expect(progressMessages.some(message => message.includes('bad sql'))).toBe(false);
+      expect(progressMessages.some(message => message.includes('SQL 查询错误'))).toBe(false);
+      expect(progressMessages).toEqual(expect.arrayContaining([
+        'SQL 查询未产出可用结果，已记录诊断信息供修正后重试。',
+      ]));
     });
 
     it('invoke_skill emits sourced zero-row display results as auditable evidence', async () => {
@@ -1718,7 +1731,7 @@ describe('createClaudeMcpServer', () => {
       expect(direct.result.sourceToolCallId).not.toBe(afterSkill.result.sourceToolCallId);
     });
 
-    it('emits sourced DataEnvelopes for empty and failed SQL results', async () => {
+    it('emits sourced DataEnvelopes for empty SQL results but keeps failed SQL diagnostics out of frontend data', async () => {
       const { tools, emittedUpdates, mockTpService } = createTestServer({ referenceTraceId: 'ref-trace-456' });
       await callTool(tools, 'submit_plan', {
         phases: [{ id: 'p1', name: 'Compare', goal: 'Collect SQL evidence', expectedTools: ['execute_sql_on'] }],
@@ -1752,11 +1765,14 @@ describe('createClaudeMcpServer', () => {
         meta: { evidenceRefId: emptyResult.evidenceRefId },
       });
       expect(failedResult.success).toBe(false);
-      expect(failedResult.evidenceRefId).toBe(diagnosticEnvelope?.meta?.evidenceRefId);
-      expect(diagnosticEnvelope?.display?.title).toBe('SQL 执行诊断');
-      expect(diagnosticEnvelope?.data?.text).toContain('SQL 执行未产出可用表格');
-      expect(diagnosticEnvelope?.data?.text).toContain('不是可引用的性能证据');
-      expect(diagnosticEnvelope?.data?.text).toContain('bad sql');
+      expect(failedResult.evidenceRefId).toBeUndefined();
+      expect(diagnosticEnvelope).toBeUndefined();
+      expect(failedResult.diagnostic).toMatchObject({
+        type: 'sql_execution_failed',
+        citableEvidence: false,
+      });
+      expect(failedResult.diagnostic?.message).toContain('不是可引用的性能证据');
+      expect(failedResult.error).toContain('bad sql');
     });
 
     it('compare_skill executes both traces and emits side provenance envelopes', async () => {
